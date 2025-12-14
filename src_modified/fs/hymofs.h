@@ -9,6 +9,11 @@
 
 #define HYMO_MAGIC_POS 0x7000000000000000ULL
 
+#define HYMO_CTL_NAME "hymo_ctl"
+#define HYMO_CTL_PATH "/dev/" HYMO_CTL_NAME
+#define HYMO_MIRROR_NAME "hymo_mirror"
+#define HYMO_MIRROR_PATH "/dev/" HYMO_MIRROR_NAME
+
 struct hymo_readdir_context {
     struct file *file;
     char *path_buf;

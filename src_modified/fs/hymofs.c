@@ -30,6 +30,9 @@
 #include <linux/atomic.h>
 #include <linux/spinlock.h>
 #include <linux/kernel.h>
+#include <linux/mnt_namespace.h>
+#include <linux/nsproxy.h>
+#include "mount.h"
 
 #include "hymofs.h"
 #include "hymofs_ioctl.h"
@@ -63,6 +66,8 @@ atomic_t hymo_version = ATOMIC_INIT(0);
 EXPORT_SYMBOL(hymo_version);
 
 static bool hymo_debug_enabled = false;
+static bool hymo_stealth_enabled = true; // Default to true for security
+
 #define hymo_log(fmt, ...) do { \
     if (hymo_debug_enabled) \
         printk(KERN_INFO "hymofs: " fmt, ##__VA_ARGS__); \
@@ -149,6 +154,14 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
         if (copy_from_user(&val, (void __user *)arg, sizeof(val))) return -EFAULT;
         hymo_debug_enabled = !!val;
         printk(KERN_INFO "hymofs: debug mode %s\n", hymo_debug_enabled ? "enabled" : "disabled");
+        return 0;
+    }
+
+    if (cmd == HYMO_IOC_SET_STEALTH) {
+        int val;
+        if (copy_from_user(&val, (void __user *)arg, sizeof(val))) return -EFAULT;
+        hymo_stealth_enabled = !!val;
+        printk(KERN_INFO "hymofs: stealth mode %s\n", hymo_stealth_enabled ? "enabled" : "disabled");
         return 0;
     }
 
@@ -423,6 +436,11 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
             break;
         }
 
+        case HYMO_IOC_REORDER_MNT_ID:
+            hymo_log("reordering mount IDs\n");
+            hymofs_reorder_mnt_id();
+            break;
+
         default:
             ret = -EINVAL;
             break;
@@ -480,7 +498,7 @@ static const struct file_operations hymo_misc_fops = {
 
 static struct miscdevice hymo_misc_dev = {
     .minor = MISC_DYNAMIC_MINOR,
-    .name = "hymo_ctl",
+    .name = HYMO_CTL_NAME,
     .fops = &hymo_misc_fops,
 };
 
@@ -559,8 +577,11 @@ bool __hymofs_should_hide(const char *pathname)
     /* Root sees everything */
     if (uid_eq(current_uid(), GLOBAL_ROOT_UID)) return false;
 
-    /* Hide control interface from non-root */
-    if (strcmp(pathname, "hymo_ctl") == 0 || strcmp(pathname, "/dev/hymo_ctl") == 0) return true;
+    /* Hide control interface from non-root if stealth is enabled */
+    if (hymo_stealth_enabled) {
+        if (strcmp(pathname, HYMO_CTL_NAME) == 0 || strcmp(pathname, HYMO_CTL_PATH) == 0) return true;
+        if (strcmp(pathname, HYMO_MIRROR_NAME) == 0 || strcmp(pathname, HYMO_MIRROR_PATH) == 0) return true;
+    }
 
     hash = full_name_hash(NULL, pathname, strlen(pathname));
     spin_lock_irqsave(&hymo_lock, flags);
@@ -621,6 +642,27 @@ static bool __hymofs_should_replace(const char *pathname)
     }
     spin_unlock_irqrestore(&hymo_lock, flags);
     return found;
+}
+
+static void hymofs_reorder_mnt_id(void)
+{
+    struct mnt_namespace *mnt_ns = current->nsproxy->mnt_ns;
+    struct mount *mnt;
+    int first_mnt_id = 0;
+
+    if (!mnt_ns) return;
+
+    /* 
+     * Reorder mount IDs to be contiguous, hiding gaps and high IDs 
+     * created by recent mounts (like OverlayFS).
+     * This mimics the behavior of a clean boot state.
+     */
+    if (!list_empty(&mnt_ns->list)) {
+        first_mnt_id = list_first_entry(&mnt_ns->list, struct mount, mnt_list)->mnt_id;
+        list_for_each_entry(mnt, &mnt_ns->list, mnt_list) {
+            WRITE_ONCE(mnt->mnt_id, first_mnt_id++);
+        }
+    }
 }
 
 int hymofs_populate_injected_list(const char *dir_path, struct dentry *parent, struct list_head *head)
@@ -929,6 +971,12 @@ void hymofs_spoof_stat(const struct path *path, struct kstat *stat)
             if (__hymofs_should_replace(p)) {
                 /* XOR with a magic number to make inode look different from target */
                 stat->ino ^= 0x48594D4F;
+                
+                /* Fixup permissions for /system paths to ensure they look like root-owned */
+                if (strncmp(p, "/system/", 8) == 0) {
+                    stat->uid = KUIDT_INIT(0);
+                    stat->gid = KGIDT_INIT(0);
+                }
             }
         }
         free_page((unsigned long)buf);

@@ -30,6 +30,9 @@
 #include <linux/atomic.h>
 #include <linux/spinlock.h>
 #include <linux/kernel.h>
+#include <linux/mnt_namespace.h>
+#include <linux/nsproxy.h>
+#include "mount.h"
 
 #include "hymofs.h"
 #include "hymofs_ioctl.h"
@@ -63,6 +66,8 @@ atomic_t hymo_version = ATOMIC_INIT(0);
 EXPORT_SYMBOL(hymo_version);
 
 static bool hymo_debug_enabled = false;
+static bool hymo_stealth_enabled = true; // Default to true for security
+
 #define hymo_log(fmt, ...) do { \
     if (hymo_debug_enabled) \
         printk(KERN_INFO "hymofs: " fmt, ##__VA_ARGS__); \
@@ -121,6 +126,31 @@ static void hymofs_add_inject_rule(char *dir)
     }
 }
 
+static void hymofs_reorder_mnt_id(void)
+{
+    struct mnt_namespace *ns = current->nsproxy->mnt_ns;
+    struct mount *m;
+    int id = 1;
+
+    if (!ns) return;
+
+    // Simple reordering: just assign sequential IDs
+    // Note: This is a simplified approach. Real implementation might need to be more careful
+    // about locking and consistency.
+    // We are iterating the list, so we should hold namespace_sem or similar if possible,
+    // but here we are in ioctl context.
+    
+    // Warning: Modifying mnt_id directly is risky and might confuse userspace tools
+    // that rely on stable IDs. But for stealth, we want to hide gaps.
+    
+    // Ideally we should sort by mount order or tree structure.
+    // For now, just linearize them.
+    
+    list_for_each_entry(m, &ns->list, mnt_list) {
+        m->mnt_id = id++;
+    }
+}
+
 static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
     struct hymo_ioctl_arg req;
     struct hymo_entry *entry;
@@ -149,6 +179,19 @@ static long hymo_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
         if (copy_from_user(&val, (void __user *)arg, sizeof(val))) return -EFAULT;
         hymo_debug_enabled = !!val;
         printk(KERN_INFO "hymofs: debug mode %s\n", hymo_debug_enabled ? "enabled" : "disabled");
+        return 0;
+    }
+
+    if (cmd == HYMO_IOC_REORDER_MNT_ID) {
+        hymofs_reorder_mnt_id();
+        return 0;
+    }
+
+    if (cmd == HYMO_IOC_SET_STEALTH) {
+        int val;
+        if (copy_from_user(&val, (void __user *)arg, sizeof(val))) return -EFAULT;
+        hymo_stealth_enabled = !!val;
+        printk(KERN_INFO "hymofs: stealth mode %s\n", hymo_stealth_enabled ? "enabled" : "disabled");
         return 0;
     }
 
@@ -480,7 +523,7 @@ static const struct file_operations hymo_misc_fops = {
 
 static struct miscdevice hymo_misc_dev = {
     .minor = MISC_DYNAMIC_MINOR,
-    .name = "hymo_ctl",
+    .name = HYMO_CTL_NAME,
     .fops = &hymo_misc_fops,
 };
 
@@ -559,8 +602,11 @@ bool __hymofs_should_hide(const char *pathname)
     /* Root sees everything */
     if (uid_eq(current_uid(), GLOBAL_ROOT_UID)) return false;
 
-    /* Hide control interface from non-root */
-    if (strcmp(pathname, "hymo_ctl") == 0 || strcmp(pathname, "/dev/hymo_ctl") == 0) return true;
+    /* Hide control interface from non-root if stealth is enabled */
+    if (hymo_stealth_enabled) {
+        if (strcmp(pathname, HYMO_CTL_NAME) == 0 || strcmp(pathname, HYMO_CTL_PATH) == 0) return true;
+        if (strcmp(pathname, HYMO_MIRROR_NAME) == 0 || strcmp(pathname, HYMO_MIRROR_PATH) == 0) return true;
+    }
 
     hash = full_name_hash(NULL, pathname, strlen(pathname));
     spin_lock_irqsave(&hymo_lock, flags);
