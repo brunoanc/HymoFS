@@ -459,7 +459,10 @@ jobs:
             cp "$image_path" ./AnyKernel3/Image
             cp "$image_path" kernel_workspace/kernel_platform/out/Final-Image-Find/Image
           fi
-          zip -r ../${{ steps.set_name.outputs.ARTIFACT_NAME }}.zip ./AnyKernel3/*
+          cd AnyKernel3
+          zip -r ../${{ steps.set_name.outputs.ARTIFACT_NAME }}.zip ./*
+          cd ..
+          cp ${{ steps.set_name.outputs.ARTIFACT_NAME }}.zip kernel_workspace/
           echo "✅ 内核打包完成: ${{ steps.set_name.outputs.ARTIFACT_NAME }}.zip"
       
       - name: Import GPG key
