@@ -518,18 +518,13 @@ jobs:
           name: ${{ env.FEIL }}_zram.ko
           path: ./kernel_workspace/kernel_platform/common/out/drivers/block/zram/zram.ko
 
-      - name: "🤖 Get bot script | 获取 bot 脚本"
-        uses: actions/checkout@v4
-        with:
-          path: bot
-
       - name: "📤 Upload to telegram | 上传至Telegram群组"
         run: |
           if [ ! -z "${{ secrets.TELEGRAM_BOT_TOKEN }}" ]; then
             echo "📤 正在上传到Telegram..."
-            cd 
+            cd ${{ github.workspace }}
             pip3 install telethon
-            python3 ./bot/script/buildbot.py "./${{ steps.set_name.outputs.ARTIFACT_NAME }}.zip"
+            python3 ${{ github.workspace }}/script/buildbot.py "./kernel_workspace/${{ steps.set_name.outputs.ARTIFACT_NAME }}.zip"
             echo "✅ 文件已上传到Telegram"
           fi
         env:
