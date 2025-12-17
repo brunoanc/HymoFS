@@ -1,6 +1,6 @@
 diff -ruN src_origin_with_susfs/fs/d_path.c src_modified_with_susfs/fs/d_path.c
---- src_origin_with_susfs/fs/d_path.c	2025-12-16 21:28:19.182781790 +0800
-+++ src_modified_with_susfs/fs/d_path.c	2025-12-16 21:28:19.177789812 +0800
+--- src_origin_with_susfs/fs/d_path.c	2025-12-17 18:13:46.917604492 +0800
++++ src_modified_with_susfs/fs/d_path.c	2025-12-17 18:13:46.911604506 +0800
 @@ -7,6 +7,9 @@
  #include <linux/slab.h>
  #include <linux/prefetch.h>
@@ -40,8 +40,8 @@ diff -ruN src_origin_with_susfs/fs/d_path.c src_modified_with_susfs/fs/d_path.c
  
 diff -ruN src_origin_with_susfs/fs/hymofs.c src_modified_with_susfs/fs/hymofs.c
 --- src_origin_with_susfs/fs/hymofs.c	1970-01-01 08:00:00.000000000 +0800
-+++ src_modified_with_susfs/fs/hymofs.c	2025-12-17 00:04:14.846446188 +0800
-@@ -0,0 +1,1247 @@
++++ src_modified_with_susfs/fs/hymofs.c	2025-12-17 18:15:30.624657980 +0800
+@@ -0,0 +1,1259 @@
 +#include <linux/string.h>
 +#include <linux/mm.h>
 +#include <linux/file.h>
@@ -84,7 +84,8 @@ diff -ruN src_origin_with_susfs/fs/hymofs.c src_modified_with_susfs/fs/hymofs.c
 +#ifdef CONFIG_HYMOFS
 +
 +/* HymoFS - Advanced Path Manipulation and Hiding */
-+#define HYMO_HASH_BITS 10
++/* Increased hash bits to reduce collisions with large number of rules */
++#define HYMO_HASH_BITS 16
 +
 +struct hymo_linux_dirent {
 +	unsigned long	d_ino;
@@ -98,6 +99,7 @@ diff -ruN src_origin_with_susfs/fs/hymofs.c src_modified_with_susfs/fs/hymofs.c
 +    char *target;
 +    unsigned char type;
 +    struct hlist_node node;
++    struct hlist_node target_node;
 +};
 +struct hymo_hide_entry {
 +    char *path;
@@ -115,6 +117,7 @@ diff -ruN src_origin_with_susfs/fs/hymofs.c src_modified_with_susfs/fs/hymofs.c
 +};
 +
 +static DEFINE_HASHTABLE(hymo_paths, HYMO_HASH_BITS);
++static DEFINE_HASHTABLE(hymo_targets, HYMO_HASH_BITS);
 +static DEFINE_HASHTABLE(hymo_hide_paths, HYMO_HASH_BITS);
 +static DEFINE_HASHTABLE(hymo_inject_dirs, HYMO_HASH_BITS);
 +static DEFINE_HASHTABLE(hymo_xattr_sbs, HYMO_HASH_BITS);
@@ -139,6 +142,7 @@ diff -ruN src_origin_with_susfs/fs/hymofs.c src_modified_with_susfs/fs/hymofs.c
 +    int bkt;
 +    hash_for_each_safe(hymo_paths, bkt, tmp, entry, node) {
 +        hash_del(&entry->node);
++        hash_del(&entry->target_node);
 +        kfree(entry->src);
 +        kfree(entry->target);
 +        kfree(entry);
@@ -425,9 +429,12 @@ diff -ruN src_origin_with_susfs/fs/hymofs.c src_modified_with_susfs/fs/hymofs.c
 +            spin_lock_irqsave(&hymo_lock, flags);
 +            hash_for_each_possible(hymo_paths, entry, node, hash) {
 +                if (strcmp(entry->src, src) == 0) {
++                    hash_del(&entry->target_node);
 +                    kfree(entry->target);
 +                    entry->target = kstrdup(target, GFP_ATOMIC);
 +                    entry->type = req.type;
++                    if (entry->target)
++                        hash_add(hymo_targets, &entry->target_node, full_name_hash(NULL, entry->target, strlen(entry->target)));
 +                    found = true;
 +                    break;
 +                }
@@ -438,9 +445,10 @@ diff -ruN src_origin_with_susfs/fs/hymofs.c src_modified_with_susfs/fs/hymofs.c
 +                    entry->src = kstrdup(src, GFP_ATOMIC);
 +                    entry->target = kstrdup(target, GFP_ATOMIC);
 +                    entry->type = req.type;
-+                    if (entry->src && entry->target)
++                    if (entry->src && entry->target) {
 +                        hash_add(hymo_paths, &entry->node, hash);
-+                    else {
++                        hash_add(hymo_targets, &entry->target_node, full_name_hash(NULL, entry->target, strlen(entry->target)));
++                    } else {
 +                        kfree(entry->src);
 +                        kfree(entry->target);
 +                        kfree(entry);
@@ -552,6 +560,7 @@ diff -ruN src_origin_with_susfs/fs/hymofs.c src_modified_with_susfs/fs/hymofs.c
 +            hash_for_each_possible(hymo_paths, entry, node, hash) {
 +                if (strcmp(entry->src, src) == 0) {
 +                    hash_del(&entry->node);
++                    hash_del(&entry->target_node);
 +                    kfree(entry->src);
 +                    kfree(entry->target);
 +                    kfree(entry);
@@ -716,6 +725,7 @@ diff -ruN src_origin_with_susfs/fs/hymofs.c src_modified_with_susfs/fs/hymofs.c
 +{
 +    spin_lock_init(&hymo_lock);
 +    hash_init(hymo_paths);
++    hash_init(hymo_targets);
 +    hash_init(hymo_hide_paths);
 +    hash_init(hymo_inject_dirs);
 +    hash_init(hymo_xattr_sbs);
@@ -757,14 +767,16 @@ diff -ruN src_origin_with_susfs/fs/hymofs.c src_modified_with_susfs/fs/hymofs.c
 +{
 +    unsigned long flags;
 +    struct hymo_entry *entry;
-+    int bkt;
++    u32 hash;
 +    char *src = NULL;
 +
 +    if (atomic_read(&hymo_version) == 0) return NULL;
 +    if (!pathname) return NULL;
 +
++    hash = full_name_hash(NULL, pathname, strlen(pathname));
++
 +    spin_lock_irqsave(&hymo_lock, flags);
-+    hash_for_each(hymo_paths, bkt, entry, node) {
++    hash_for_each_possible(hymo_targets, entry, target_node, hash) {
 +        if (strcmp(entry->target, pathname) == 0) {
 +            src = kstrdup(entry->src, GFP_ATOMIC);
 +            break;
@@ -1449,8 +1461,8 @@ diff -ruN src_origin_with_susfs/fs/hymofs_ioctl.h src_modified_with_susfs/fs/hym
 +
 +#endif
 diff -ruN src_origin_with_susfs/fs/Kconfig src_modified_with_susfs/fs/Kconfig
---- src_origin_with_susfs/fs/Kconfig	2025-12-16 21:28:19.182781790 +0800
-+++ src_modified_with_susfs/fs/Kconfig	2025-12-16 21:28:19.177789812 +0800
+--- src_origin_with_susfs/fs/Kconfig	2025-12-17 18:13:46.917604492 +0800
++++ src_modified_with_susfs/fs/Kconfig	2025-12-17 18:13:46.911604506 +0800
 @@ -386,4 +386,10 @@
  config IO_WQ
  	bool
@@ -1463,8 +1475,8 @@ diff -ruN src_origin_with_susfs/fs/Kconfig src_modified_with_susfs/fs/Kconfig
 +
  endmenu
 diff -ruN src_origin_with_susfs/fs/Makefile src_modified_with_susfs/fs/Makefile
---- src_origin_with_susfs/fs/Makefile	2025-12-16 21:28:19.182781790 +0800
-+++ src_modified_with_susfs/fs/Makefile	2025-12-16 21:28:19.177789812 +0800
+--- src_origin_with_susfs/fs/Makefile	2025-12-17 18:13:46.917604492 +0800
++++ src_modified_with_susfs/fs/Makefile	2025-12-17 18:13:46.911604506 +0800
 @@ -17,6 +17,8 @@
  		fs_types.o fs_context.o fs_parser.o fsopen.o init.o \
  		kernel_read_file.o remap_range.o
@@ -1475,8 +1487,8 @@ diff -ruN src_origin_with_susfs/fs/Makefile src_modified_with_susfs/fs/Makefile
  
  obj-$(CONFIG_KSU_SUSFS) += susfs.o
 diff -ruN src_origin_with_susfs/fs/namei.c src_modified_with_susfs/fs/namei.c
---- src_origin_with_susfs/fs/namei.c	2025-12-16 21:28:19.183780185 +0800
-+++ src_modified_with_susfs/fs/namei.c	2025-12-16 21:28:19.179786603 +0800
+--- src_origin_with_susfs/fs/namei.c	2025-12-17 18:13:46.919604488 +0800
++++ src_modified_with_susfs/fs/namei.c	2025-12-17 18:13:46.912604503 +0800
 @@ -47,6 +47,9 @@
  #include "internal.h"
  #include "mount.h"
@@ -1511,8 +1523,8 @@ diff -ruN src_origin_with_susfs/fs/namei.c src_modified_with_susfs/fs/namei.c
  	struct filename *result;
  	char *kname;
 diff -ruN src_origin_with_susfs/fs/readdir.c src_modified_with_susfs/fs/readdir.c
---- src_origin_with_susfs/fs/readdir.c	2025-12-16 21:28:19.183780185 +0800
-+++ src_modified_with_susfs/fs/readdir.c	2025-12-16 23:56:57.029631698 +0800
+--- src_origin_with_susfs/fs/readdir.c	2025-12-17 18:13:46.919604488 +0800
++++ src_modified_with_susfs/fs/readdir.c	2025-12-17 18:13:46.913604501 +0800
 @@ -32,6 +32,12 @@
  extern bool susfs_is_base_dentry_android_data_dir(struct dentry* base);
  extern bool susfs_is_base_dentry_sdcard_dir(struct dentry* base);
@@ -1815,8 +1827,8 @@ diff -ruN src_origin_with_susfs/fs/readdir.c src_modified_with_susfs/fs/readdir.
  	return error;
  }
 diff -ruN src_origin_with_susfs/fs/stat.c src_modified_with_susfs/fs/stat.c
---- src_origin_with_susfs/fs/stat.c	2025-12-16 23:18:17.947230894 +0800
-+++ src_modified_with_susfs/fs/stat.c	2025-12-16 23:17:38.302678961 +0800
+--- src_origin_with_susfs/fs/stat.c	2025-12-17 18:13:46.919604488 +0800
++++ src_modified_with_susfs/fs/stat.c	2025-12-17 18:13:46.913604501 +0800
 @@ -29,6 +29,10 @@
  #include "internal.h"
  #include "mount.h"
@@ -1855,8 +1867,8 @@ diff -ruN src_origin_with_susfs/fs/stat.c src_modified_with_susfs/fs/stat.c
  }
  EXPORT_SYMBOL(vfs_getattr_nosec);
 diff -ruN src_origin_with_susfs/fs/xattr.c src_modified_with_susfs/fs/xattr.c
---- src_origin_with_susfs/fs/xattr.c	2025-12-16 21:28:19.184778581 +0800
-+++ src_modified_with_susfs/fs/xattr.c	2025-12-16 21:28:19.179786603 +0800
+--- src_origin_with_susfs/fs/xattr.c	2025-12-17 18:13:46.920604486 +0800
++++ src_modified_with_susfs/fs/xattr.c	2025-12-17 18:13:46.914604499 +0800
 @@ -24,6 +24,9 @@
  #include <linux/posix_acl_xattr.h>
  
