@@ -101,7 +101,7 @@ def get_versions():
     else:
         ksu_folder="KernelSU"
     current_work=os.getcwd()
-    os.chdir(current_work+"/kernel_workspace/kernel_platform/common") #除非next
+    os.chdir(current_work+"/kernel_workspace/common") #除非next
     kernelversion=get_kernel_versions()
     os.chdir(os.getcwd()+f"/../{ksu_folder}")
     ksuver=os.popen("echo $(git describe --tags $(git rev-list --tags --max-count=1))-$(git rev-parse --short HEAD)@$(git branch --show-current)").read().strip()
