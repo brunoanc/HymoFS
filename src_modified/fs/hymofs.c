@@ -42,7 +42,6 @@
 
 extern int (*hymo_dispatch_cmd_hook)(unsigned int cmd, void __user *arg);
 
-#define CONFIG_HYMOFS_USE_KSU
 #ifdef CONFIG_HYMOFS_USE_KSU
 extern bool susfs_is_current_ksu_domain(void);
 #endif
@@ -1546,7 +1545,7 @@ int hymofs_inject_entries64(struct hymo_readdir_context *ctx, void __user **dir_
 }
 EXPORT_SYMBOL(hymofs_inject_entries64);
 
-static dev_t get_dev_for_path(const char *path_str) {
+static dev_t __attribute__((unused)) get_dev_for_path(const char *path_str) {
     struct path path;
     dev_t dev = 0;
     if (kern_path(path_str, LOOKUP_FOLLOW, &path) == 0) {
